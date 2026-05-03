@@ -1,0 +1,7 @@
+Django>=4.2,<6.0
+djangorestframework>=3.14.0
+requests>=2.31.0
+geopy>=2.4.0
+numpy>=1.26.0
+scipy>=1.11.0
+django-redis>=5.4.0
