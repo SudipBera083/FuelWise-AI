@@ -127,9 +127,26 @@ class StationLocator:
         return route_stations
 
 def optimize_fuel_stops(route_distance, stations):
-    total_cost = 0.0
-    stops = []
-    
+    """
+    Globally optimal fuel stop planner using O(N²) forward dynamic programming.
+
+    Strategy
+    --------
+    Build a node list:  [first_station, ..., destination]
+    dp_cost[i]  – minimum total fuel spend to *arrive* at node i.
+    dp_fuel[i]  – gallons in tank upon arriving at node i (under the optimal policy).
+    dp_prev[i]  – index of the node we travelled from.
+    dp_buy[i]   – gallons purchased at dp_prev[i] before departing for i.
+
+    For every forward edge j → i (gap ≤ MAX_RANGE_MILES) we decide how many
+    gallons to buy at j:
+      • If p[i] < p[j]  → buy only the minimum needed to reach i (save money at i).
+      • If p[i] >= p[j] → fill the tank at j (stock up at the cheaper price).
+    We then cap to the tank capacity and floor to the minimum needed, update dp[i]
+    only when the new cost is strictly lower, guaranteeing a globally optimal path.
+    """
+
+    # ------------------------------------------------------------------ setup
     dest = {
         'id': -1,
         'dist_along_route': route_distance,
@@ -138,89 +155,112 @@ def optimize_fuel_stops(route_distance, stations):
         'city': '',
         'state': '',
         'lat': 0.0,
-        'lng': 0.0
+        'lng': 0.0,
     }
-    
-    stations = [s for s in stations if s['dist_along_route'] < route_distance]
-    stations.append(dest)
-    
-    current_fuel = 0.0
-    
-    if not stations or stations[0]['id'] == -1:
+
+    nodes = [s for s in stations if s['dist_along_route'] < route_distance]
+    nodes.append(dest)
+
+    if not nodes or nodes[0]['id'] == -1:
         return 0.0, []
-        
-    current_station_idx = 0
-    current_dist = stations[0]['dist_along_route']
-    
-    while current_station_idx < len(stations) - 1:
-        curr_station = stations[current_station_idx]
-        
-        reachable = []
-        for j in range(current_station_idx + 1, len(stations)):
-            if stations[j]['dist_along_route'] - current_dist <= MAX_RANGE_MILES:
-                reachable.append((j, stations[j]))
+
+    N = len(nodes)
+
+    # DP tables
+    INF = float('inf')
+    dp_cost = [INF] * N
+    dp_fuel = [0.0] * N   # fuel on arrival
+    dp_prev = [-1]  * N
+    dp_buy  = [0.0] * N   # gallons bought at dp_prev[i] before leaving for i
+
+    # Start: arrive at node 0 with empty tank, zero cost
+    dp_cost[0] = 0.0
+    dp_fuel[0] = 0.0
+
+    # ---------------------------------------------------------------- forward DP
+    for j in range(N - 1):
+        if dp_cost[j] == INF:
+            continue  # node j is unreachable – skip
+
+        dist_j  = nodes[j]['dist_along_route']
+        price_j = nodes[j]['price']
+        fuel_j  = dp_fuel[j]           # gallons on arrival at j
+
+        for i in range(j + 1, N):
+            gap        = nodes[i]['dist_along_route'] - dist_j
+            if gap > MAX_RANGE_MILES:
+                break                  # stations are sorted; no point continuing
+
+            fuel_needed = gap / MPG    # gallons to cover the gap
+            price_i     = nodes[i]['price']
+
+            # Bounds on purchase at j
+            min_buy = max(0.0, fuel_needed - fuel_j)        # must not run dry
+            max_buy = TANK_CAPACITY_GALLONS - fuel_j        # cannot overfill
+
+            if min_buy > max_buy + 1e-9:
+                continue               # infeasible (gap > tank range); skip
+
+            # ---- Optimal purchase decision at j when heading to i ----
+            # If i is cheaper, defer buying — only purchase what's strictly needed.
+            # If i is more expensive (or equal), stock up at j's lower price.
+            if price_i < price_j:
+                buy = min_buy          # buy as little as possible here
             else:
-                break
-                
-        if not reachable:
-            raise ValueError(f"Cannot reach next station from {curr_station['name']} (gap > {MAX_RANGE_MILES} miles).")
-            
-        cheaper_station_idx = None
-        for j, s in reachable:
-            if s['price'] < curr_station['price']:
-                cheaper_station_idx = j
-                break
-                
-        if cheaper_station_idx is not None:
-            next_s = stations[cheaper_station_idx]
-            dist_to_next = next_s['dist_along_route'] - current_dist
-            fuel_needed = dist_to_next / MPG
-            
-            fuel_to_buy = max(0.0, fuel_needed - current_fuel)
-            if fuel_to_buy > 0:
-                cost = fuel_to_buy * curr_station['price']
-                total_cost += cost
-                stops.append({
-                    'location': f"{curr_station['name']}, {curr_station['city']}, {curr_station['state']}",
-                    'price': curr_station['price'],
-                    'gallons': round(fuel_to_buy, 2),
-                    'cost': round(cost, 2),
-                    'lat': curr_station['lat'],
-                    'lng': curr_station['lng']
-                })
-                current_fuel += fuel_to_buy
-            
-            current_dist = next_s['dist_along_route']
-            current_fuel -= dist_to_next / MPG
-            current_station_idx = cheaper_station_idx
-            
-        else:
-            fuel_to_buy = TANK_CAPACITY_GALLONS - current_fuel
-            if fuel_to_buy > 0:
-                cost = fuel_to_buy * curr_station['price']
-                total_cost += cost
-                stops.append({
-                    'location': f"{curr_station['name']}, {curr_station['city']}, {curr_station['state']}",
-                    'price': curr_station['price'],
-                    'gallons': round(fuel_to_buy, 2),
-                    'cost': round(cost, 2),
-                    'lat': curr_station['lat'],
-                    'lng': curr_station['lng']
-                })
-                current_fuel = TANK_CAPACITY_GALLONS
-                
-            min_price_idx = reachable[0][0]
-            min_price = reachable[0][1]['price']
-            for j, s in reachable:
-                if s['price'] <= min_price:
-                    min_price = s['price']
-                    min_price_idx = j
-                    
-            next_s = stations[min_price_idx]
-            dist_to_next = next_s['dist_along_route'] - current_dist
-            
-            current_dist = next_s['dist_along_route']
-            current_fuel -= dist_to_next / MPG
-            current_station_idx = min_price_idx
-            
+                buy = max_buy          # fill up at the cheaper current station
+
+            # Clamp for floating-point safety
+            buy = max(min_buy, min(buy, max_buy))
+
+            fuel_arriving_i = fuel_j + buy - fuel_needed
+            new_cost = dp_cost[j] + buy * price_j
+
+            if new_cost < dp_cost[i] - 1e-9:
+                dp_cost[i] = new_cost
+                dp_fuel[i] = fuel_arriving_i
+                dp_prev[i] = j
+                dp_buy[i]  = buy
+
+    # ----------------------------------------- check destination is reachable
+    if dp_cost[N - 1] == INF:
+        raise ValueError(
+            f"Cannot reach the destination within {MAX_RANGE_MILES}-mile tank range."
+        )
+
+    # -------------------------------------------------- backtrack & build stops
+    path_indices = []
+    idx = N - 1
+    while idx != -1:
+        path_indices.append(idx)
+        idx = dp_prev[idx]
+    path_indices.reverse()           # origin-first order
+
+    total_cost = 0.0
+    stops = []
+
+    for k in range(1, len(path_indices)):
+        node_idx  = path_indices[k]
+        src_idx   = path_indices[k - 1]
+        gallons   = dp_buy[node_idx]
+
+        if gallons < 1e-6:
+            continue                  # no fuel bought at source – skip entry
+
+        src    = nodes[src_idx]
+        cost   = gallons * src['price']
+        total_cost += cost
+
+        # Destination node has no meaningful address
+        if src['id'] == -1:
+            continue
+
+        stops.append({
+            'location': f"{src['name']}, {src['city']}, {src['state']}",
+            'price':    src['price'],
+            'gallons':  round(gallons, 2),
+            'cost':     round(cost, 2),
+            'lat':      src['lat'],
+            'lng':      src['lng'],
+        })
+
     return total_cost, stops
